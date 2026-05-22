@@ -64,6 +64,7 @@ def alert_keyboard(pair):
         [InlineKeyboardButton("📈 Выше цены", callback_data=f"set_above_{pair}"),
          InlineKeyboardButton("📉 Ниже цены", callback_data=f"set_below_{pair}")],
         [InlineKeyboardButton("🗑 Удалить алерты", callback_data=f"del_alerts_{pair}")],
+        [InlineKeyboardButton("❌ Отписаться", callback_data=f"unsub_{pair}")],
         [InlineKeyboardButton("← Назад", callback_data="back_pairs")],
     ])
 
@@ -114,8 +115,17 @@ async def on_callback(update, ctx):
         pair = data[7:]
         subs = user_subscriptions.setdefault(uid, set())
         if pair in subs:
-            subs.discard(pair)
-            await query.edit_message_text(f"❌ Отписался от {pair}\n\nВыбери пары:", reply_markup=pairs_keyboard(uid))
+            # Уже подписан — показать меню алерта
+            base, quote = PAIRS[pair]
+            rate = get_rate(base, quote)
+            alerts = user_alerts.get(uid, {}).get(pair, {})
+            above = alerts.get("above", "—")
+            below = alerts.get("below", "—")
+            await query.edit_message_text(
+                f"🔔 *{pair}*\nТекущий курс: `{rate}`\n\nАлерт выше: `{above}`\nАлерт ниже: `{below}`",
+                parse_mode="Markdown",
+                reply_markup=alert_keyboard(pair)
+            )
         else:
             subs.add(pair)
             base, quote = PAIRS[pair]
@@ -134,6 +144,11 @@ async def on_callback(update, ctx):
             f"{emoji} Введи цену для алерта по *{pair}*\n_(например: 1.0850)_",
             parse_mode="Markdown"
         )
+    elif data.startswith("unsub_"):
+        pair = data[6:]
+        user_subscriptions.get(uid, set()).discard(pair)
+        user_alerts.get(uid, {}).pop(pair, None)
+        await query.edit_message_text(f"❌ Отписался от {pair}\n\nВыбери пары:", reply_markup=pairs_keyboard(uid))
     elif data.startswith("del_alerts_"):
         pair = data[11:]
         user_alerts.get(uid, {}).pop(pair, None)
