@@ -1,1 +1,1 @@
-worker: python forex_bot_proxy.py
+worker: python forex_bot_railway.py
