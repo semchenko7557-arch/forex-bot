@@ -10,7 +10,7 @@ from telegram.ext import (
 )
 
 BOT_TOKEN = "8828482180:AAE_Sdrqk5O5USAWpsShd2jetGt099J-Jso"
-EXCHANGE_API_KEY = "67d1275a636192e890d24d79"
+ALPHA_API_KEY = "3Q5QBKUEZZ7JFTA7"
 CHECK_INTERVAL = 60
 
 
@@ -35,11 +35,12 @@ user_subscriptions: dict[int, set] = {}
 
 def get_rate(base, quote):
     try:
-        url = f"https://v6.exchangerate-api.com/v6/{EXCHANGE_API_KEY}/pair/{base}/{quote}"
+        url = f"https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency={base}&to_currency={quote}&apikey={ALPHA_API_KEY}"
         r = requests.get(url, timeout=10)
         data = r.json()
-        if data.get("result") == "success":
-            return round(data["conversion_rate"], 5)
+        rate_data = data.get("Realtime Currency Exchange Rate", {})
+        if rate_data:
+            return round(float(rate_data["5. Exchange Rate"]), 5)
     except Exception as e:
         logger.error(f"Ошибка курса {base}/{quote}: {e}")
     return None
