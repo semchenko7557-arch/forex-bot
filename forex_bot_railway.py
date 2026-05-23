@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import requests
+import json
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -29,14 +30,44 @@ PAIRS = {
     "ETH/USD": ("ETH", "USD"),
 }
 
+# Своп-ставки (пункты в день, приблизительные рыночные значения)
+SWAP_RATES = {
+    "EUR/USD": {"buy": -6.5,  "sell": 1.2},
+    "GBP/USD": {"buy": -4.8,  "sell": 0.8},
+    "USD/JPY": {"buy": 2.1,   "sell": -8.3},
+    "USD/CHF": {"buy": 1.5,   "sell": -6.1},
+    "AUD/USD": {"buy": -3.2,  "sell": -1.1},
+    "USD/CAD": {"buy": 0.9,   "sell": -5.4},
+    "NZD/USD": {"buy": -2.8,  "sell": -0.9},
+    "EUR/GBP": {"buy": -3.1,  "sell": 0.4},
+    "BTC/USD": {"buy": -50.0, "sell": -50.0},
+    "ETH/USD": {"buy": -30.0, "sell": -30.0},
+}
+
+# Размер пункта для расчёта лота (стоимость 1 пункта на 1 стандартный лот в USD)
+PIP_VALUE = {
+    "EUR/USD": 10.0,
+    "GBP/USD": 10.0,
+    "USD/JPY": 9.1,
+    "USD/CHF": 10.0,
+    "AUD/USD": 10.0,
+    "USD/CAD": 7.7,
+    "NZD/USD": 10.0,
+    "EUR/GBP": 12.8,
+    "BTC/USD": 1.0,
+    "ETH/USD": 1.0,
+}
+
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 user_alerts: dict[int, dict[str, dict]] = {}
 user_subscriptions: dict[int, set] = {}
-user_journal: dict[int, list] = {}        # торговый журнал
-user_settings: dict[int, dict] = {}       # настройки (депозит, риск)
-user_diary: dict[int, list] = {}          # психологический дневник
+user_journal: dict[int, list] = {}
+user_settings: dict[int, dict] = {}
+user_diary: dict[int, list] = {}
+user_voice_notes: dict[int, list] = {}
+news_keywords: dict[int, list] = {}
 
 # ─── API ──────────────────────────────────────────────────────────────────────
 
@@ -52,13 +83,15 @@ def get_rate(base, quote):
         logger.error(f"Ошибка курса {base}/{quote}: {e}")
     return None
 
-def get_news():
+def get_news(keywords=None):
     try:
         url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&topics=forex&apikey={ALPHA_API_KEY}"
         r = requests.get(url, timeout=10)
         data = r.json()
-        items = data.get("feed", [])[:5]
-        return items
+        items = data.get("feed", [])
+        if keywords:
+            items = [i for i in items if any(k.lower() in i.get("title","").lower() for k in keywords)]
+        return items[:5]
     except Exception as e:
         logger.error(f"Ошибка новостей: {e}")
     return []
@@ -70,9 +103,12 @@ def main_keyboard():
         [InlineKeyboardButton("📊 Котировки и алерты", callback_data="menu_pairs"),
          InlineKeyboardButton("📰 Новости", callback_data="menu_news")],
         [InlineKeyboardButton("📒 Журнал сделок", callback_data="menu_journal"),
-         InlineKeyboardButton("🧮 Калькулятор риска", callback_data="menu_risk")],
-        [InlineKeyboardButton("🧠 Дневник психологии", callback_data="menu_diary"),
-         InlineKeyboardButton("⚙️ Настройки", callback_data="menu_settings")],
+         InlineKeyboardButton("🧮 Калькулятор лота", callback_data="menu_risk")],
+        [InlineKeyboardButton("💱 Своп-калькулятор", callback_data="menu_swap"),
+         InlineKeyboardButton("🧠 Дневник психологии", callback_data="menu_diary")],
+        [InlineKeyboardButton("🎙 Голосовые заметки", callback_data="menu_voice"),
+         InlineKeyboardButton("🔍 Мониторинг новостей", callback_data="menu_monitor")],
+        [InlineKeyboardButton("⚙️ Настройки", callback_data="menu_settings")],
     ])
 
 def pairs_keyboard(user_id):
@@ -100,20 +136,32 @@ def alert_keyboard(pair):
         [InlineKeyboardButton("← Назад", callback_data="back_pairs")],
     ])
 
+def pairs_select_keyboard(prefix):
+    buttons = []
+    row = []
+    for pair in PAIRS:
+        row.append(InlineKeyboardButton(pair, callback_data=f"{prefix}{pair}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton("← Назад", callback_data="back_main")])
+    return InlineKeyboardMarkup(buttons)
+
 def journal_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Добавить сделку", callback_data="journal_add")],
-        [InlineKeyboardButton("📊 Статистика", callback_data="journal_stats")],
-        [InlineKeyboardButton("📋 Последние 10", callback_data="journal_list")],
+        [InlineKeyboardButton("📊 Статистика", callback_data="journal_stats"),
+         InlineKeyboardButton("📋 Последние 10", callback_data="journal_list")],
         [InlineKeyboardButton("← Меню", callback_data="back_main")],
     ])
 
-def risk_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🧮 Рассчитать лот", callback_data="risk_calc")],
-        [InlineKeyboardButton("💰 Установить депозит", callback_data="risk_deposit")],
-        [InlineKeyboardButton("← Меню", callback_data="back_main")],
-    ])
+def swap_pairs_keyboard():
+    return pairs_select_keyboard("swap_pair_")
+
+def risk_pairs_keyboard():
+    return pairs_select_keyboard("risk_pair_")
 
 def diary_keyboard():
     return InlineKeyboardMarkup([
@@ -122,13 +170,28 @@ def diary_keyboard():
         [InlineKeyboardButton("← Меню", callback_data="back_main")],
     ])
 
+def voice_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📖 Мои заметки", callback_data="voice_list")],
+        [InlineKeyboardButton("← Меню", callback_data="back_main")],
+    ])
+
+def monitor_keyboard(uid):
+    keywords = news_keywords.get(uid, [])
+    kw_str = ", ".join(keywords) if keywords else "не заданы"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Добавить ключевое слово", callback_data="monitor_add")],
+        [InlineKeyboardButton("🗑 Очистить список", callback_data="monitor_clear")],
+        [InlineKeyboardButton("📰 Проверить сейчас", callback_data="monitor_check")],
+        [InlineKeyboardButton("← Меню", callback_data="back_main")],
+    ])
+
 # ─── Команды ──────────────────────────────────────────────────────────────────
 
 async def cmd_start(update, ctx):
     user = update.effective_user
     await update.message.reply_text(
-        f"👋 Привет, {user.first_name}!\n\n"
-        "Я твой торговый помощник. Выбери раздел 👇",
+        f"👋 Привет, {user.first_name}!\n\nЯ твой торговый помощник. Выбери раздел 👇",
         reply_markup=main_keyboard()
     )
 
@@ -139,10 +202,26 @@ async def cmd_menu(update, ctx):
 
 async def on_message(update, ctx):
     uid = update.effective_user.id
-    text = update.message.text
     state = ctx.user_data.get("state")
 
-    # Алерт — ввод цены
+    # Голосовое сообщение
+    if update.message.voice:
+        note = {
+            "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
+            "file_id": update.message.voice.file_id,
+            "duration": update.message.voice.duration,
+            "text": ctx.user_data.pop("voice_caption", ""),
+        }
+        user_voice_notes.setdefault(uid, []).append(note)
+        ctx.user_data.pop("state", None)
+        await update.message.reply_text(
+            f"🎙 Голосовая заметка сохранена!\nДлительность: {note['duration']} сек.",
+            reply_markup=voice_keyboard()
+        )
+        return
+
+    text = update.message.text if update.message.text else ""
+
     if state == "awaiting_price":
         awaiting = ctx.user_data.get("awaiting_price")
         try:
@@ -163,14 +242,11 @@ async def on_message(update, ctx):
             parse_mode="Markdown", reply_markup=main_keyboard()
         )
 
-    # Журнал — добавление сделки
     elif state == "journal_add":
-        # Формат: EURUSD buy 1.1000 1.0950 1.1100
-        # пара, направление, вход, стоп, тейк
         parts = text.strip().split()
         if len(parts) < 3:
             await update.message.reply_text(
-                "❌ Неверный формат. Введи:\n`EURUSD buy 1.1000 1.0950 1.1100`\n(пара, направление, вход, стоп-лосс, тейк-профит)",
+                "❌ Формат: `EURUSD buy 1.1000 1.0950 1.1100`",
                 parse_mode="Markdown"
             )
             return
@@ -182,28 +258,21 @@ async def on_message(update, ctx):
             tp = float(parts[4].replace(",", ".")) if len(parts) > 4 else None
             trade = {
                 "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
-                "pair": pair,
-                "direction": direction,
-                "entry": entry,
-                "sl": sl,
-                "tp": tp,
-                "result": None,
-                "pnl": None,
+                "pair": pair, "direction": direction,
+                "entry": entry, "sl": sl, "tp": tp,
+                "result": None, "pnl": None,
             }
             user_journal.setdefault(uid, []).append(trade)
             ctx.user_data.pop("state", None)
             sl_str = f"\nСтоп-лосс: `{sl}`" if sl else ""
             tp_str = f"\nТейк-профит: `{tp}`" if tp else ""
             await update.message.reply_text(
-                f"✅ Сделка добавлена!\n\n"
-                f"Пара: `{pair}`\nНаправление: {direction}\nВход: `{entry}`{sl_str}{tp_str}\n\n"
-                f"Когда закроешь сделку — добавь результат через журнал.",
+                f"✅ Сделка добавлена!\n`{pair}` {direction} @ `{entry}`{sl_str}{tp_str}",
                 parse_mode="Markdown", reply_markup=journal_keyboard()
             )
         except (ValueError, IndexError):
-            await update.message.reply_text("❌ Неверный формат. Пример: `EURUSD buy 1.1000 1.0950 1.1100`", parse_mode="Markdown")
+            await update.message.reply_text("❌ Пример: `EURUSD buy 1.1000 1.0950 1.1100`", parse_mode="Markdown")
 
-    # Закрытие сделки
     elif state == "journal_close":
         idx = ctx.user_data.get("close_idx")
         try:
@@ -218,37 +287,48 @@ async def on_message(update, ctx):
             ctx.user_data.pop("state", None)
             emoji = "✅" if trade["result"] == "win" else "❌"
             await update.message.reply_text(
-                f"{emoji} Сделка закрыта!\nРезультат: *{trade['result'].upper()}*\nP&L: `{trade['pnl']}`",
+                f"{emoji} Сделка закрыта! Результат: *{trade['result'].upper()}* | P&L: `{trade['pnl']}`",
                 parse_mode="Markdown", reply_markup=journal_keyboard()
             )
         except ValueError:
             await update.message.reply_text("❌ Введи цену закрытия, например: 1.1050")
 
-    # Калькулятор риска
     elif state == "risk_input":
+        # Формат: вход стоп (например: 1.1000 1.0950)
         parts = text.strip().split()
+        pair = ctx.user_data.get("risk_pair", "EUR/USD")
         settings = user_settings.get(uid, {})
         deposit = settings.get("deposit", 1000)
         risk_pct = settings.get("risk_pct", 1)
         try:
-            if len(parts) == 1:
-                sl_pips = float(parts[0].replace(",", "."))
-                risk_usd = deposit * risk_pct / 100
-                lot = round(risk_usd / (sl_pips * 10), 2)
-                await update.message.reply_text(
-                    f"🧮 *Расчёт позиции:*\n\n"
-                    f"Депозит: `${deposit}`\nРиск: `{risk_pct}%` = `${risk_usd}`\n"
-                    f"Стоп-лосс: `{sl_pips} пунктов`\n\n"
-                    f"💡 Размер лота: *{lot}*",
-                    parse_mode="Markdown", reply_markup=risk_keyboard()
-                )
+            entry = float(parts[0].replace(",", "."))
+            sl = float(parts[1].replace(",", "."))
+            pip_val = PIP_VALUE.get(pair, 10.0)
+            sl_distance = abs(entry - sl)
+            # конвертируем дистанцию в пункты (для JPY пара — умножаем на 100, иначе на 10000)
+            if "JPY" in pair:
+                sl_pips = round(sl_distance * 100, 1)
             else:
-                await update.message.reply_text("❌ Введи только количество пунктов стоп-лосса, например: `30`", parse_mode="Markdown")
+                sl_pips = round(sl_distance * 10000, 1)
+            risk_usd = deposit * risk_pct / 100
+            lot = round(risk_usd / (sl_pips * pip_val), 2)
+            rr_tp = round(risk_usd * 2, 2)
             ctx.user_data.pop("state", None)
-        except ValueError:
-            await update.message.reply_text("❌ Введи число, например: 30")
+            ctx.user_data.pop("risk_pair", None)
+            await update.message.reply_text(
+                f"🧮 *Расчёт позиции — {pair}*\n\n"
+                f"Депозит: `${deposit}`\n"
+                f"Риск: `{risk_pct}%` = `${risk_usd}`\n"
+                f"Вход: `{entry}`\n"
+                f"Стоп-лосс: `{sl}`\n"
+                f"Расстояние до стопа: `{sl_pips} пунктов`\n\n"
+                f"💡 *Размер лота: {lot}*\n"
+                f"🎯 Тейк для RR 1:2 = `${rr_tp}`",
+                parse_mode="Markdown", reply_markup=main_keyboard()
+            )
+        except (ValueError, IndexError):
+            await update.message.reply_text("❌ Введи: `1.1000 1.0950` (вход и стоп через пробел)", parse_mode="Markdown")
 
-    # Установка депозита
     elif state == "risk_deposit":
         parts = text.strip().split()
         try:
@@ -259,23 +339,53 @@ async def on_message(update, ctx):
             user_settings[uid]["risk_pct"] = risk_pct
             ctx.user_data.pop("state", None)
             await update.message.reply_text(
-                f"✅ Настройки сохранены!\nДепозит: `${deposit}`\nРиск на сделку: `{risk_pct}%`",
-                parse_mode="Markdown", reply_markup=risk_keyboard()
+                f"✅ Сохранено!\nДепозит: `${deposit}` | Риск: `{risk_pct}%`",
+                parse_mode="Markdown", reply_markup=main_keyboard()
             )
         except ValueError:
             await update.message.reply_text("❌ Введи: `1000 1` (депозит и % риска)", parse_mode="Markdown")
 
-    # Дневник психологии
+    elif state == "swap_input":
+        pair = ctx.user_data.get("swap_pair", "EUR/USD")
+        parts = text.strip().split()
+        try:
+            lot = float(parts[0].replace(",", "."))
+            days = int(parts[1]) if len(parts) > 1 else 1
+            rates = SWAP_RATES.get(pair, {"buy": 0, "sell": 0})
+            swap_buy = round(rates["buy"] * lot * days, 2)
+            swap_sell = round(rates["sell"] * lot * days, 2)
+            ctx.user_data.pop("state", None)
+            ctx.user_data.pop("swap_pair", None)
+            await update.message.reply_text(
+                f"💱 *Своп — {pair}*\n\n"
+                f"Лот: `{lot}` | Дней: `{days}`\n\n"
+                f"📈 Buy своп: `{swap_buy}$`\n"
+                f"📉 Sell своп: `{swap_sell}$`\n\n"
+                f"_Своп начисляется каждую ночь в 00:00 по серверному времени._",
+                parse_mode="Markdown", reply_markup=main_keyboard()
+            )
+        except (ValueError, IndexError):
+            await update.message.reply_text("❌ Введи: `1.0 3` (лот и количество дней)", parse_mode="Markdown")
+
     elif state == "diary_add":
-        entry = {
-            "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
-            "text": text
-        }
+        entry = {"date": datetime.now().strftime("%d.%m.%Y %H:%M"), "text": text}
         user_diary.setdefault(uid, []).append(entry)
         ctx.user_data.pop("state", None)
+        await update.message.reply_text("✅ Запись добавлена!", reply_markup=diary_keyboard())
+
+    elif state == "voice_caption":
+        ctx.user_data["voice_caption"] = text
+        ctx.user_data["state"] = "awaiting_voice"
+        await update.message.reply_text("✅ Подпись сохранена! Теперь отправь голосовое сообщение 🎙")
+
+    elif state == "monitor_add":
+        keywords = [k.strip() for k in text.split(",")]
+        news_keywords.setdefault(uid, []).extend(keywords)
+        ctx.user_data.pop("state", None)
         await update.message.reply_text(
-            "✅ Запись добавлена в дневник!",
-            reply_markup=diary_keyboard()
+            f"✅ Добавлены ключевые слова: {', '.join(keywords)}\n\n"
+            f"Все слова: {', '.join(news_keywords[uid])}",
+            reply_markup=monitor_keyboard(uid)
         )
 
     else:
@@ -289,7 +399,6 @@ async def on_callback(update, ctx):
     uid = query.from_user.id
     data = query.data
 
-    # Главное меню
     if data == "back_main":
         await query.edit_message_text("Главное меню:", reply_markup=main_keyboard())
 
@@ -368,37 +477,38 @@ async def on_callback(update, ctx):
         for item in news:
             title = item.get("title", "")[:80]
             lines.append(f"• {title}")
-        await query.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Меню", callback_data="back_main")]]))
+        await query.edit_message_text(
+            "\n".join(lines), parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Меню", callback_data="back_main")]])
+        )
 
     # ── Журнал ──
     elif data == "menu_journal":
-        await query.edit_message_text("📒 *Журнал сделок*\n\nЗдесь ты записываешь свои сделки и отслеживаешь статистику.", parse_mode="Markdown", reply_markup=journal_keyboard())
+        await query.edit_message_text("📒 *Журнал сделок*", parse_mode="Markdown", reply_markup=journal_keyboard())
 
     elif data == "journal_add":
         ctx.user_data["state"] = "journal_add"
         await query.edit_message_text(
-            "➕ Введи сделку в формате:\n`EURUSD buy 1.1000 1.0950 1.1100`\n\n"
-            "пара → направление (buy/sell) → вход → стоп-лосс → тейк-профит\n"
-            "_(стоп и тейк необязательны)_",
+            "➕ Введи сделку:\n`EURUSD buy 1.1000 1.0950 1.1100`\n\n"
+            "пара → buy/sell → вход → стоп → тейк _(стоп и тейк необязательны)_",
             parse_mode="Markdown"
         )
 
     elif data == "journal_list":
         trades = user_journal.get(uid, [])
         if not trades:
-            await query.edit_message_text("Журнал пуст. Добавь первую сделку!", reply_markup=journal_keyboard())
+            await query.edit_message_text("Журнал пуст.", reply_markup=journal_keyboard())
             return
         lines = ["📋 *Последние сделки:*\n"]
-        for i, t in enumerate(trades[-10:]):
+        for t in trades[-10:]:
             result = t.get("result", "открыта")
-            pnl = f" | P&L: {t['pnl']}" if t.get("pnl") else ""
+            pnl = f" P&L:{t['pnl']}" if t.get("pnl") else ""
             emoji = "✅" if result == "win" else "❌" if result == "loss" else "🔄"
-            lines.append(f"{emoji} {t['date']} | {t['pair']} {t['direction']} @ {t['entry']}{pnl}")
+            lines.append(f"{emoji} {t['date']} {t['pair']} {t['direction']} @{t['entry']}{pnl}")
         keyboard = []
-        trades_count = len(trades)
-        for i in range(max(0, trades_count-5), trades_count):
-            if not trades[i].get("result"):
-                keyboard.append([InlineKeyboardButton(f"Закрыть #{i+1} {trades[i]['pair']}", callback_data=f"close_trade_{i}")])
+        for i, t in enumerate(trades):
+            if not t.get("result"):
+                keyboard.append([InlineKeyboardButton(f"Закрыть #{i+1} {t['pair']}", callback_data=f"close_trade_{i}")])
         keyboard.append([InlineKeyboardButton("← Назад", callback_data="menu_journal")])
         await query.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -407,15 +517,13 @@ async def on_callback(update, ctx):
         ctx.user_data["state"] = "journal_close"
         ctx.user_data["close_idx"] = idx
         trade = user_journal[uid][idx]
-        await query.edit_message_text(
-            f"Закрытие сделки {trade['pair']} {trade['direction']} @ {trade['entry']}\n\nВведи цену закрытия:",
-        )
+        await query.edit_message_text(f"Закрытие {trade['pair']} {trade['direction']} @ {trade['entry']}\n\nВведи цену закрытия:")
 
     elif data == "journal_stats":
         trades = user_journal.get(uid, [])
         closed = [t for t in trades if t.get("result")]
         if not closed:
-            await query.edit_message_text("Нет закрытых сделок для статистики.", reply_markup=journal_keyboard())
+            await query.edit_message_text("Нет закрытых сделок.", reply_markup=journal_keyboard())
             return
         wins = sum(1 for t in closed if t["result"] == "win")
         losses = len(closed) - wins
@@ -423,31 +531,41 @@ async def on_callback(update, ctx):
         total_pnl = round(sum(t.get("pnl", 0) for t in closed), 5)
         await query.edit_message_text(
             f"📊 *Статистика*\n\n"
-            f"Всего сделок: `{len(closed)}`\n"
-            f"Прибыльных: `{wins}` ✅\n"
-            f"Убыточных: `{losses}` ❌\n"
-            f"Винрейт: `{winrate}%`\n"
-            f"Общий P&L: `{total_pnl}`",
+            f"Сделок: `{len(closed)}`\n✅ Прибыльных: `{wins}`\n❌ Убыточных: `{losses}`\n"
+            f"Винрейт: `{winrate}%`\nОбщий P&L: `{total_pnl}`",
             parse_mode="Markdown", reply_markup=journal_keyboard()
         )
 
-    # ── Калькулятор риска ──
+    # ── Калькулятор лота ──
     elif data == "menu_risk":
         settings = user_settings.get(uid, {})
         deposit = settings.get("deposit", "не задан")
         risk_pct = settings.get("risk_pct", 1)
         await query.edit_message_text(
-            f"🧮 *Калькулятор риска*\n\nДепозит: `${deposit}`\nРиск на сделку: `{risk_pct}%`",
-            parse_mode="Markdown", reply_markup=risk_keyboard()
+            f"🧮 *Калькулятор лота*\n\nДепозит: `${deposit}` | Риск: `{risk_pct}%`\n\nВыбери пару для расчёта:",
+            parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("💰 Установить депозит/риск", callback_data="risk_deposit")]] +
+                [[InlineKeyboardButton(p, callback_data=f"risk_pair_{p}")] for p in list(PAIRS.keys())[:5]] +
+                [[InlineKeyboardButton(p, callback_data=f"risk_pair_{p}")] for p in list(PAIRS.keys())[5:]] +
+                [[InlineKeyboardButton("← Меню", callback_data="back_main")]]
+            )
         )
 
-    elif data == "risk_calc":
-        settings = user_settings.get(uid, {})
-        if not settings.get("deposit"):
-            await query.edit_message_text("Сначала установи депозит!", reply_markup=risk_keyboard())
+    elif data.startswith("risk_pair_"):
+        pair = data[10:]
+        if not user_settings.get(uid, {}).get("deposit"):
+            await query.edit_message_text(
+                "❌ Сначала установи депозит!\nНажми 'Установить депозит/риск'.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Назад", callback_data="menu_risk")]])
+            )
             return
         ctx.user_data["state"] = "risk_input"
-        await query.edit_message_text("Введи размер стоп-лосса в *пунктах* (например: `30`):", parse_mode="Markdown")
+        ctx.user_data["risk_pair"] = pair
+        await query.edit_message_text(
+            f"🧮 *{pair}* — введи точку входа и стоп-лосс через пробел:\n\n"
+            f"`1.1000 1.0950`\n\n_(вход и стоп-лосс)_",
+            parse_mode="Markdown"
+        )
 
     elif data == "risk_deposit":
         ctx.user_data["state"] = "risk_deposit"
@@ -456,27 +574,108 @@ async def on_callback(update, ctx):
             parse_mode="Markdown"
         )
 
-    # ── Дневник психологии ──
+    # ── Своп-калькулятор ──
+    elif data == "menu_swap":
+        await query.edit_message_text(
+            "💱 *Своп-калькулятор*\n\nВыбери пару:",
+            parse_mode="Markdown", reply_markup=swap_pairs_keyboard()
+        )
+
+    elif data.startswith("swap_pair_"):
+        pair = data[10:]
+        rates = SWAP_RATES.get(pair, {"buy": 0, "sell": 0})
+        ctx.user_data["state"] = "swap_input"
+        ctx.user_data["swap_pair"] = pair
+        await query.edit_message_text(
+            f"💱 *{pair}*\n\n"
+            f"Ставки свопа:\n📈 Buy: `{rates['buy']}` пунктов/день\n📉 Sell: `{rates['sell']}` пунктов/день\n\n"
+            f"Введи лот и количество дней через пробел:\n`1.0 3`",
+            parse_mode="Markdown"
+        )
+
+    # ── Дневник ──
     elif data == "menu_diary":
-        await query.edit_message_text("🧠 *Дневник психологии*\n\nЗаписывай свои мысли и эмоции после сделок.", parse_mode="Markdown", reply_markup=diary_keyboard())
+        await query.edit_message_text("🧠 *Дневник психологии*", parse_mode="Markdown", reply_markup=diary_keyboard())
 
     elif data == "diary_add":
         ctx.user_data["state"] = "diary_add"
         await query.edit_message_text(
-            "✍️ Напиши свои мысли о сегодняшней торговле:\n\n"
-            "_(следовал ли плану, какие эмоции были, что можно улучшить)_",
+            "✍️ Напиши свои мысли о сегодняшней торговле:\n_(эмоции, ошибки, что улучшить)_",
             parse_mode="Markdown"
         )
 
     elif data == "diary_list":
         entries = user_diary.get(uid, [])
         if not entries:
-            await query.edit_message_text("Дневник пуст. Добавь первую запись!", reply_markup=diary_keyboard())
+            await query.edit_message_text("Дневник пуст.", reply_markup=diary_keyboard())
             return
         lines = ["📖 *Последние записи:*\n"]
         for e in entries[-5:]:
-            lines.append(f"📅 {e['date']}\n{e['text'][:100]}...\n")
+            lines.append(f"📅 _{e['date']}_\n{e['text'][:120]}\n")
         await query.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=diary_keyboard())
+
+    # ── Голосовые заметки ──
+    elif data == "menu_voice":
+        notes = user_voice_notes.get(uid, [])
+        count = len(notes)
+        await query.edit_message_text(
+            f"🎙 *Голосовые заметки*\n\nСохранено заметок: `{count}`\n\n"
+            f"Просто отправь голосовое сообщение — я его сохраню!\n"
+            f"Можешь сначала написать подпись текстом, потом отправить голосовое.",
+            parse_mode="Markdown", reply_markup=voice_keyboard()
+        )
+
+    elif data == "voice_list":
+        notes = user_voice_notes.get(uid, [])
+        if not notes:
+            await query.edit_message_text("Нет голосовых заметок.", reply_markup=voice_keyboard())
+            return
+        await query.edit_message_text(
+            f"🎙 *Твои голосовые заметки ({len(notes)}):*\n\nОтправь /menu и перейди в голосовые — бот пришлёт их по очереди.",
+            parse_mode="Markdown", reply_markup=voice_keyboard()
+        )
+        for note in notes[-5:]:
+            caption = f"📅 {note['date']}" + (f"\n{note['text']}" if note.get("text") else "")
+            await update.effective_message.reply_voice(voice=note["file_id"], caption=caption)
+
+    # ── Мониторинг новостей ──
+    elif data == "menu_monitor":
+        keywords = news_keywords.get(uid, [])
+        kw_str = ", ".join(keywords) if keywords else "не заданы"
+        await query.edit_message_text(
+            f"🔍 *Мониторинг новостей*\n\nКлючевые слова: `{kw_str}`\n\n"
+            f"Бот будет присылать новости содержащие твои ключевые слова каждые 30 минут.",
+            parse_mode="Markdown", reply_markup=monitor_keyboard(uid)
+        )
+
+    elif data == "monitor_add":
+        ctx.user_data["state"] = "monitor_add"
+        await query.edit_message_text(
+            "Введи ключевые слова через запятую:\n`ФРС, инфляция, NFP, EUR`",
+            parse_mode="Markdown"
+        )
+
+    elif data == "monitor_clear":
+        news_keywords[uid] = []
+        await query.edit_message_text("🗑 Список ключевых слов очищен.", reply_markup=monitor_keyboard(uid))
+
+    elif data == "monitor_check":
+        keywords = news_keywords.get(uid, [])
+        if not keywords:
+            await query.edit_message_text("Сначала добавь ключевые слова!", reply_markup=monitor_keyboard(uid))
+            return
+        await query.edit_message_text("⏳ Ищу новости...")
+        news = get_news(keywords)
+        if not news:
+            await query.edit_message_text(
+                f"Новостей по словам [{', '.join(keywords)}] не найдено.",
+                reply_markup=monitor_keyboard(uid)
+            )
+            return
+        lines = [f"🔍 *Новости по: {', '.join(keywords)}*\n"]
+        for item in news:
+            lines.append(f"• {item.get('title','')[:80]}")
+        await query.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=monitor_keyboard(uid))
 
     # ── Настройки ──
     elif data == "menu_settings":
@@ -485,12 +684,30 @@ async def on_callback(update, ctx):
         risk_pct = settings.get("risk_pct", 1)
         await query.edit_message_text(
             f"⚙️ *Настройки*\n\nДепозит: `${deposit}`\nРиск на сделку: `{risk_pct}%`\n\n"
-            f"Чтобы изменить — перейди в Калькулятор риска → Установить депозит",
+            f"Изменить → Калькулятор лота → Установить депозит/риск",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Меню", callback_data="back_main")]])
         )
 
-# ─── Проверка цен ─────────────────────────────────────────────────────────────
+# ─── Мониторинг новостей (фоновый) ───────────────────────────────────────────
+
+async def monitor_news(app):
+    while True:
+        await asyncio.sleep(1800)  # каждые 30 минут
+        for uid, keywords in list(news_keywords.items()):
+            if not keywords:
+                continue
+            news = get_news(keywords)
+            if news:
+                lines = [f"🔍 *Новости по: {', '.join(keywords)}*\n"]
+                for item in news:
+                    lines.append(f"• {item.get('title','')[:80]}")
+                try:
+                    await app.bot.send_message(chat_id=uid, text="\n".join(lines), parse_mode="Markdown")
+                except Exception as e:
+                    logger.error(f"Ошибка мониторинга: {e}")
+
+# ─── Проверка алертов ─────────────────────────────────────────────────────────
 
 async def check_prices(app):
     while True:
@@ -523,9 +740,10 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("menu", cmd_menu))
     app.add_handler(CallbackQueryHandler(on_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
+    app.add_handler(MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, on_message))
     loop = asyncio.get_event_loop()
     loop.create_task(check_prices(app))
+    loop.create_task(monitor_news(app))
     logger.info("Бот запущен!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
